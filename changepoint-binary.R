@@ -14,12 +14,15 @@ library(permutest)
 #   The algorithm searches over possible changepoints in the odd-indexed data
 #   (or the full data if sample splitting is disabled), identifies the 
 #   location that maximizes the likelihood ratio statistic, and then uses a 
-#   Fisher's exact test on the even-indexed data to assess statistical 
-#   significance.
+#   Fisher's exact test (or z-test when threshold > 0) on the even-indexed data
+#   to assess statistical significance.
 #
 # Inputs:
 #   - data: A numeric vector of binary values (0 or 1) representing a performance 
 #           metric over time.
+#   - threshold: minimum change in proportion (e.g., 0.05 = 5 percentage
+#           points) to test for. If 0, Fisher's exact test is used. If > 0, a
+#           one-sided unpooled two-proportion z-test of H0: change <= threshold.
 #   - sample_splitting: Logical flag (default TRUE). If TRUE, uses odd-indexed 
 #           observations for changepoint detection and even-indexed observations 
 #           for hypothesis testing. If FALSE, uses the entire dataset for both.
@@ -35,10 +38,11 @@ library(permutest)
 #     changepoint search to reduce spurious edge effects.
 #   - Log-likelihoods are calculated under a Bernoulli model for binary data.
 # -----------------------------------------------------------------------------
-binary_cp <- function(data, sample_splitting = TRUE){
+binary_cp <- function(data, threshold = 0, sample_splitting = TRUE){
   # Initialize variables
   max_lr <- -Inf
   changepoint <- NULL
+  max_diff <- NA_real_ 
   p_value <- 1
   
   # if sample splitting is true, split data be even/odd indices
@@ -80,19 +84,27 @@ binary_cp <- function(data, sample_splitting = TRUE){
       max_lr <- LR
       changepoint <- k
       max_diff <- p2-p1
-      
-      # Construct 2x2 contingency table for Fisher's exact test on test data
-      segment1_1s <- sum(data_even[1:k] == 1)
-      segment1_0s <- k - segment1_1s
-      segment2_1s <- sum(data_even[(k+1):n_even] == 1)
-      segment2_0s <- (n_even - k) - segment2_1s
-      contingency_table <- matrix(c(segment1_1s, segment1_0s, 
-                                    segment2_1s, segment2_0s), nrow = 2)
-
-      # Apply Fisher's exact test
-      fisher_result <- fisher.test(contingency_table)
-      p_value <- fisher_result$p.value
     }
+  }
+  
+  # test on even-indexed timepoints
+  before <- data_even[1:changepoint]
+  after  <- data_even[(changepoint + 1):n_even]
+  dir <- if (max_diff >= 0) 1 else -1 
+  
+  
+  if (threshold == 0) {
+    # Fisher's exact test
+    tab <- matrix(c(sum(before == 1), sum(before == 0),
+                    sum(after == 1),  sum(after == 0)), nrow = 2)
+    alt <- if (dir == 1) "less" else "greater"
+    p_value <- fisher.test(tab, alternative = alt)$p.value
+  } else {
+    # one-sided unpooled two-proportion z-test of H0: change <= threshold
+    pb <- mean(before); pa <- mean(after)
+    se <- sqrt(pb * (1 - pb) / length(before) + pa * (1 - pa) / length(after))
+    stat <- dir * (pa - pb) - threshold
+    p_value <- if (se == 0) as.numeric(stat <= 0) else pnorm(stat / se, lower.tail = FALSE)
   }
   
   # calculate changepoint in global index
@@ -121,6 +133,8 @@ binary_cp <- function(data, sample_splitting = TRUE){
 #           metric over time.
 #   - alpha: significance level (default 0.05) for rejecting the null hypothesis 
 #            of no changepoint in a segment.
+#   - threshold: minimum change in proportion (e.g., 0.05 = 5 percentage
+#           points) to test for.
 #   - sample_splitting: Logical flag (default TRUE). If TRUE, uses odd-indexed 
 #           observations for changepoint detection and even-indexed observations 
 #           for hypothesis testing. If FALSE, uses the entire dataset for both.
@@ -138,6 +152,7 @@ binary_cp <- function(data, sample_splitting = TRUE){
 # -----------------------------------------------------------------------------
 binary_segment <- function(data,
                            alpha = 0.05,
+                           threshold = 0,
                            sample_splitting = TRUE,
                            min_seg_len = if (sample_splitting) 80L else 40L) {
   
@@ -148,7 +163,8 @@ binary_segment <- function(data,
     
     seg <- data[s:e]
     
-    res <- binary_cp(seg, sample_splitting = sample_splitting)
+    res <- binary_cp(seg, threshold = threshold,
+                     sample_splitting = sample_splitting)
     
     # stop if no cp found or not significant
     if (is.null(res$changepoint) || is.na(res$p_value) || res$p_value >= alpha) {
